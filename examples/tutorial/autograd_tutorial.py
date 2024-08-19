@@ -4,6 +4,7 @@
 import ark
 import torch
 import torch.optim as optim
+from torchviz import make_dot
 
 
 # For debugging purposes, will remove and rewrite into
@@ -45,11 +46,11 @@ class SimpleModelARK(ark.Module):
         self.weight_4 = weight_4
 
     def forward(self, x):
-        x = ark.matmul(x, self.weight_0)
-        x = ark.matmul(x, self.weight_1)
-        x = ark.matmul(x, self.weight_2)
-        x = ark.matmul(x, self.weight_3)
-        x = ark.matmul(x, self.weight_4)
+        x = ark.matmul(x, self.weight_0, transpose_other=True)
+        x = ark.matmul(x, self.weight_1, transpose_other=True)
+        x = ark.matmul(x, self.weight_2, transpose_other=True)
+        x = ark.matmul(x, self.weight_3, transpose_other=True)
+        x = ark.matmul(x, self.weight_4, transpose_other=True)
         x = ark.relu(x)
         return x
 
@@ -69,10 +70,17 @@ def replace_layers_with_ark(model):
     )
     weight_4 = torch.nn.Parameter(
         model.layers[4].weight.to("cuda:0").requires_grad_(True)
-    )
+    )     
     ark_module = ark.RuntimeModule(
         SimpleModelARK(weight_0, weight_1, weight_2, weight_3, weight_4)
     )
+    # Register the parameters with the RuntimeModule
+    ark_module.register_parameter("weight_0", weight_0)
+    ark_module.register_parameter("weight_1", weight_1)
+    ark_module.register_parameter("weight_2", weight_2)
+    ark_module.register_parameter("weight_3", weight_3)
+    ark_module.register_parameter("weight_4", weight_4)
+
     return ark_module
 
 
@@ -106,9 +114,46 @@ def compare_grad(ark_model, torch_model, atol=1e-4, rtol=1e-2):
                 print(f"Torch gradient: {torch_param.grad}")
 
 
-torch_output = torch_model(input_torch)
-with ark.torch_ctx.use_torch_autograd():
-    ark_output = ark_model(input_ark)
+loss_fn = torch.nn.MSELoss()
+optim_torch = optim.SGD(torch_model.parameters(), lr=0.01)
+optim_ark = optim.SGD(ark_model.parameters(), lr=0.01)
 
-# Compare outputs
-assert torch.allclose(torch_output, ark_output, atol=1e-4, rtol=1e-2)
+num_iters = 5
+for iter in range(num_iters):
+    print(f"Iteration {iter+1}/{num_iters}")
+
+    optim_torch.zero_grad()
+    optim_ark.zero_grad()
+
+    pytorch_output = torch_model(input_torch)
+    with ark.torch_ctx.use_torch_autograd():
+        ark_output = ark_model(input_ark)
+
+    assert torch.allclose(pytorch_output, ark_output, atol=1e-4, rtol=1e-2)
+    # for debugging
+    pytorch_graph = make_dot(pytorch_output, params=dict(torch_model.named_parameters()))
+    pytorch_graph.render(f"pytorch-autograd-graph-{iter+1}", format="png")
+
+    # for debugging
+    ark_graph = make_dot(ark_output, params=dict(ark_model.named_parameters()))
+    ark_graph.render(f"ark-autograd-graph-{iter+1}", format="png")
+
+    # Compute losses.
+    torch_loss = loss_fn(pytorch_output, target)
+    ark_loss = loss_fn(ark_output, target)
+
+    # See how ARK's loss compares to PyTorch's loss.
+    print(f"\nPyTorch loss: {torch_loss.item()}")
+    print(f"\nARK loss: {ark_loss.item()}\n")
+    assert torch.allclose(torch_loss, ark_loss, atol=1e-4, rtol=1e-2)
+
+    # Perform a backward pass.
+    torch_loss.backward()
+    ark_loss.backward()
+
+    optim_torch.step()
+    optim_ark.step()
+
+    # Ensure gradients of both models are updated accordingly.
+    compare_grad(ark_model, torch_model)
+

@@ -146,11 +146,10 @@ class Module:
         grad_tensors = Tensor._tensor_grads
         tns_map = _OperationRegistry.tns_map
         for tns_id in grad_tensors:
-            if tns_id != output_id and tns_id in tns_map:
-                tns_map[tns_id] = grad_tensors[tns_id].to_torch()
+            tns_map[tns_id] = grad_tensors[tns_id].to_torch()
         # Execute torch operations to build up autograd graph
         _OperationRegistry.execute_overridden_ops()
-        _OperationRegistry.clear()
+        #_OperationRegistry.clear()
         return output
 
     def forward(self, *args: Any, **kwargs: Any) -> Any: ...

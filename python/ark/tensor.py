@@ -36,7 +36,7 @@ class Tensor:
         self,
         _tensor: _Tensor,
         initializer: Initializer = None,
-        requires_grad: bool = False,
+        requires_grad: bool = True,
     ):
         """
         Initializes a new instance of the Tensor class.
@@ -163,6 +163,8 @@ class Tensor:
         torch_view = torch.utils.dlpack.from_dlpack(dl_capsule)
         # Keep dl_capsule alive not to free the memory
         torch_view.__ark_buffer__ = dl_capsule
+        if self.requires_grad:
+            torch_view.requires_grad_(True)
         return torch_view
 
     @staticmethod
@@ -182,7 +184,8 @@ class Tensor:
                 shape=list(tensor.shape),
                 dtype=DataType.from_torch(tensor.dtype),
                 data=tensor.data_ptr(),
-            )
+            ),
+            requires_grad=tensor.requires_grad
         )
         # Share ownership of the memory with the torch tensor
         ark_tensor.__torch_buffer__ = tensor

@@ -194,6 +194,12 @@ def matmul(
     """
     if output is not NullTensor:
         output = output._tensor
+    
+    input_ids = []
+    if input.requires_grad:
+        input_ids.append(input._tensor.id())
+    if other.requires_grad:
+        input_ids.append(other._tensor.id())
     result = Tensor(
         Model.get_model().matmul(
             input._tensor,
@@ -202,22 +208,17 @@ def matmul(
             transpose_input,
             transpose_other,
             name,
-        )
+        ),
+        requires_grad=(len(input_ids) != 0)
     )
-    input_ids = []
-    if input.requires_grad:
-        input_ids.append(input._tensor.id())
-    if other.requires_grad:
-        input_ids.append(other._tensor.id())
+
     if input_ids:
         # Record operation if at least one of the input tensors require
         # gradients
         _OperationRegistry.record_op(
             input_ids=input_ids,
             output_ids=[result._tensor.id()],
-            op=torch.matmul,
-            args=(),
-            kwargs={},
+            op=torch.matmul
         )
     return result
 
@@ -359,14 +360,13 @@ def relu(
     if output is not NullTensor:
         output = output._tensor
 
-    res = Tensor(Model.get_model().relu(input._tensor, output, name))
-    _OperationRegistry.record_op(
-        input_ids=[input._tensor.id()],
-        output_ids=[res._tensor.id()],
-        op=torch.nn.functional.relu,
-        args=(),
-        kwargs={},
-    )
+    res = Tensor(Model.get_model().relu(input._tensor, output, name), requires_grad=input.requires_grad)
+    if input.requires_grad:
+        _OperationRegistry.record_op(
+            input_ids=[input._tensor.id()],
+            output_ids=[res._tensor.id()],
+            op=torch.nn.functional.relu
+        )
     return res
 
 

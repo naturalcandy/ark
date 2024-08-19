@@ -6,6 +6,7 @@ from typing import List, Iterable, Union, Optional
 from .tensor import Dims, Tensor, Parameter, NullTensor, _cpp_tensor
 from .data_type import DataType, fp32
 from .model import Model
+from .autograd import _OperationRegistry
 
 try:
     import torch
@@ -88,8 +89,8 @@ def copy(
     if output is not NullTensor:
         output = output._tensor
     if isinstance(input, Tensor):
-        intput = intput._tensor
-    return Tensor(Model.get_model().copy(intput, output, name))
+        input = input._tensor
+    return Tensor(Model.get_model().copy(input, output, name))
 
 
 def div(
@@ -193,7 +194,7 @@ def matmul(
     """
     if output is not NullTensor:
         output = output._tensor
-    return Tensor(
+    result = Tensor(
         Model.get_model().matmul(
             input._tensor,
             other._tensor,
@@ -203,6 +204,22 @@ def matmul(
             name,
         )
     )
+    input_ids = []
+    if input.requires_grad:
+        input_ids.append(input._tensor.id())
+    if other.requires_grad:
+        input_ids.append(other._tensor.id())
+    if input_ids:
+        # Record operation if at least one of the input tensors require
+        # gradients
+        _OperationRegistry.record_op(
+            input_ids=input_ids,
+            output_ids=[result._tensor.id()],
+            op=torch.matmul,
+            args=(),
+            kwargs={},
+        )
+    return result
 
 
 def mul(
@@ -341,7 +358,16 @@ def relu(
     """
     if output is not NullTensor:
         output = output._tensor
-    return Tensor(Model.get_model().relu(input._tensor, output, name))
+
+    res = Tensor(Model.get_model().relu(input._tensor, output, name))
+    _OperationRegistry.record_op(
+        input_ids=[input._tensor.id()],
+        output_ids=[res._tensor.id()],
+        op=torch.nn.functional.relu,
+        args=(),
+        kwargs={},
+    )
+    return res
 
 
 def reshape(
@@ -482,6 +508,7 @@ def tensor(
     padded_shape: Iterable[int] = [],
     rank: int = -1,
     name: str = "",
+    requires_grad: bool = False,
 ) -> Tensor:
     """
     Construct a tensor with given shape and data type.
@@ -492,7 +519,8 @@ def tensor(
     return Tensor(
         _cpp_tensor(
             shape, dtype, strides, offsets, padded_shape, rank, None, name
-        )
+        ),
+        requires_grad=requires_grad,
     )
 
 
@@ -553,13 +581,16 @@ def parameter(
     offsets: Iterable[int] = [],
     padded_shape: Iterable[int] = [],
     name: str = "",
+    requires_grad: bool = True,
 ) -> Parameter:
     """
     Construct a parameter with given shape and data type.
     """
-    return Parameter(
+    param = Parameter(
         _cpp_tensor(shape, dtype, strides, offsets, padded_shape, None, name)
     )
+    param.requires_grad_(requires_grad)
+    return param
 
 
 def softmax(

@@ -2,7 +2,7 @@
 # Licensed under the MIT license.
 
 import numpy as np
-from typing import Callable, Iterable, List, Union, Type
+from typing import Callable, Iterable, List, Union, Type, Dict
 
 from ._ark_core import _Dims, _Tensor, _NullTensor
 from .data_type import DataType, fp32
@@ -29,6 +29,9 @@ Initializer = Type[Callable[[], Union[torch.Tensor, np.ndarray]]]
 
 
 class Tensor:
+
+    _tensor_grads: Dict[int, "Tensor"] = {}
+
     def __init__(
         self,
         _tensor: _Tensor,
@@ -45,15 +48,16 @@ class Tensor:
         self._tensor = _tensor
         self.initializer: Initializer = initializer
         self.requires_grad = requires_grad
-    
+        if self.requires_grad:
+            Tensor._tensor_grads[self._tensor.id()] = self
+
     def __hash__(self):
         return self._tensor.id()
-    
+
     def __eq__(self, other):
         if not isinstance(other, Tensor):
             return False
         return self._tensor.id() == other._tensor.id()
-
 
     def shape(self) -> List[int]:
         """
@@ -232,37 +236,43 @@ class Tensor:
             self.copy(data)
         return self
 
+    def requires_grad_(self, requires_grad: bool = True) -> "Tensor":
+        """
+        Sets the `requires_grad` attribute in-place for the tensor.
+        If `requires_grad` is True, the tensor will be tracked for gradient
+        updates.
+        """
+        self.requires_grad = requires_grad
+        if requires_grad:
+            Tensor._tensor_grads[self._tensor.id()] = self
+        elif self._tensor.id() in Tensor._tensor_grads:
+            del Tensor._tensor_grads[self._tensor.id()]
+        return self
 
-class Parameter(Tensor):
+
+class Parameter(Tensor, torch.nn.Parameter):
     """
     A tensor as a parameter.
     """
 
     def __init__(
         self,
-        tensor: _Tensor,
-        from_torch: bool,
+        tensor: Union[_Tensor, "torch.nn.Parameter"],
     ):
         """
         Initializes a new instance of the Parameter class.
-        Args:
-            _tensor (_ark_core._Tensor): The underlying _Tensor object.
-            from_torch: Indicates if the Parameter is tied to a torch.nn.Paramter
         """
-        if not _no_torch and from_torch:
-            _tensor = tensor._tensor
+        if not _no_torch and isinstance(tensor, torch.nn.Parameter):
+            ark_tensor = Tensor.from_torch(tensor)
+            self._tensor = ark_tensor._tensor
+            ark_tensor.requires_grad_(True)
             self.torch_param = tensor
             self.staged_tensor = None
-            Tensor.__init__(
-                self,
-                _tensor,
-                requires_grad=tensor.requires_grad,
-            )
         elif isinstance(tensor, _Tensor):
             _tensor = tensor
             self.torch_param = None
             self.staged_tensor = None
-            Tensor.__init__(self, _tensor, requires_grad=False)
+            Tensor.__init__(self, _tensor, requires_grad=True)
         else:
             raise TypeError(
                 "tensor must be an ARK tensor or a torch.nn.Parameter"

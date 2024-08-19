@@ -3,15 +3,16 @@
 
 import logging
 import numpy as np
+import contextlib
 from typing import Any, Dict, Union
-from .tensor import Parameter
+from .tensor import Tensor, Parameter
+from .autograd import _OperationRegistry
 from .runtime import Runtime
 from .model import Model
 from .data_type import DataType
 
 try:
     import torch
-    from .ops import placeholder
 
     _no_torch = False
 except ImportError:
@@ -44,8 +45,7 @@ class Module:
         elif isinstance(__value, Parameter):
             self.register_parameter(__name, __value)
         elif not _no_torch and isinstance(__value, torch.nn.Parameter):
-            shape, dtype = list(__value.shape), DataType.from_torch(__value.dtype)
-            __value = Parameter(placeholder(shape, dtype, data=__value), True)
+            __value = Parameter(__value)
             self.register_parameter(__name, __value)
         super().__setattr__(__name, __value)
 
@@ -123,6 +123,36 @@ class Module:
             }
         raise ValueError(f"Unsupported mode: {mode}")
 
+    def _torch_forward(self, *args: Any, **kwargs: Any):
+        Model.reset()
+        input_args, input_kwargs = [], {}
+        for arg in args:
+            if isinstance(arg, torch.Tensor):
+                input_args.append(Tensor.from_torch(arg))
+            else:
+                input_args.append(arg)
+        for k, v in kwargs.items():
+            if isinstance(v, torch.Tensor):
+                input_kwargs[k] = Tensor.from_torch(v)
+            else:
+                input_kwargs[k] = v
+        output = self.forward(*input_args, **input_kwargs)
+        output_id = output._tensor.id()
+        rt = Runtime.get_runtime()
+        rt.launch()
+        rt.run()
+        rt.stop()
+        output = output.to_torch()
+        grad_tensors = Tensor._tensor_grads
+        tns_map = _OperationRegistry.tns_map
+        for tns_id in grad_tensors:
+            if tns_id != output_id and tns_id in tns_map:
+                tns_map[tns_id] = grad_tensors[tns_id].to_torch()
+        # Execute torch operations to build up autograd graph
+        _OperationRegistry.execute_overridden_ops()
+        _OperationRegistry.clear()
+        return output
+
     def forward(self, *args: Any, **kwargs: Any) -> Any: ...
 
     def backward(self, *args: Any, **kwargs: Any) -> Any: ...
@@ -153,16 +183,14 @@ class _Function(torch.autograd.Function):
         input_requires_grad = 0
         for arg in args:
             if isinstance(arg, torch.Tensor):
-                shape, dtype = list(arg.shape), DataType.from_torch(arg.dtype)
-                input_args.append(placeholder(shape, dtype, data=arg))
+                input_args.append(Tensor.from_torch(arg))
                 if arg.requires_grad:
                     input_requires_grad += 1
             else:
                 input_args.append(arg)
         for k, v in kwargs.items():
             if isinstance(v, torch.Tensor):
-                shape, dtype = list(arg.shape), DataType.from_torch(arg.dtype)
-                input_kwargs[k] = placeholder(shape, dtype, data=v)
+                input_kwargs[k] = Tensor.from_torch(v)
                 if v.requires_grad:
                     input_requires_grad += 1
             else:
@@ -183,13 +211,14 @@ class _Function(torch.autograd.Function):
         and parameters using the ARK module backwards pass, and updates the gradients of the corresponding
         PyTorch parameters.
         """
+        if torch_ctx.context["use_torch_autograd"]:
+            raise RuntimeError(
+                "User should not provide a backward method when using PyTorch's autograd"
+            )
         Model.reset()
         # i think we should support placeholder initialization
         # with just pytorch tensor
-        ark_grad_outputs = []
-        for grad in grad_outputs:
-            shape, dtype = list(grad.shape), DataType.from_torch(grad.dtype)
-            ark_grad_outputs.append(placeholder(shape, dtype, data=grad))
+        ark_grad_outputs = [Tensor.from_torch(grad) for grad in grad_outputs]
         grads = ctx.ark_module.backward(*ark_grad_outputs)
         grad_inputs, grad_weights = (
             grads[: ctx.num_inp_grad],
@@ -218,4 +247,33 @@ class RuntimeModule(torch.nn.Module):
         self.ark_module = ark_module
 
     def forward(self, *args, **kwargs):
-        return _Function.apply(self.ark_module, *args, **kwargs)
+        if torch_ctx.context["use_torch_autograd"]:
+            return self.ark_module._torch_forward(*args, **kwargs)
+        else:
+            return _Function.apply(self.ark_module, *args, **kwargs)
+
+
+class TorchContext:
+
+    def __init__(self):
+        self.context = {
+            "use_torch_autograd": False,
+        }
+        self.contexts = []
+
+    @contextlib.contextmanager
+    def _set_context(self, **kwargs):
+        self.contexts.append(self.context.copy())
+        self.context.update(kwargs)
+        try:
+            yield
+        finally:
+            self.context = self.contexts.pop()
+
+    @contextlib.contextmanager
+    def use_torch_autograd(self):
+        with self._set_context(use_torch_autograd=True):
+            yield
+
+
+torch_ctx = TorchContext()
